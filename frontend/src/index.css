@@ -1,0 +1,105 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Waqf DocVerify design tokens, expressed as HSL for shadcn/ui compatibility.
+       Source hexes (see tailwind.config.js "domain palette"):
+       primary   = petrol-ink   #1B3A3A
+       accent    = brass        #B08D3E
+       background= stone        #EDEFEA
+       destructive = rust       #A64B3C
+       foreground  = ink        #1C2321 */
+
+    --background: 84 10% 94%;
+    --foreground: 163 11% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 163 11% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 163 11% 12%;
+
+    --primary: 180 36% 17%;
+    --primary-foreground: 84 12% 96%;
+
+    --secondary: 84 8% 88%;
+    --secondary-foreground: 163 11% 12%;
+
+    --muted: 84 8% 90%;
+    --muted-foreground: 163 8% 40%;
+
+    --accent: 42 48% 47%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 9 47% 44%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 84 10% 85%;
+    --input: 84 10% 85%;
+    --ring: 180 36% 17%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Dark-mode reading of the same registry-ledger palette: deep petrol-ink
+       background instead of pale stone paper, brass/registry-green accents
+       kept legible against it. */
+    --background: 180 22% 8%;
+    --foreground: 84 10% 92%;
+
+    --card: 180 20% 11%;
+    --card-foreground: 84 10% 92%;
+
+    --popover: 180 20% 11%;
+    --popover-foreground: 84 10% 92%;
+
+    --primary: 84 12% 92%;
+    --primary-foreground: 180 36% 13%;
+
+    --secondary: 180 14% 16%;
+    --secondary-foreground: 84 10% 92%;
+
+    --muted: 180 14% 16%;
+    --muted-foreground: 84 6% 65%;
+
+    --accent: 42 48% 55%;
+    --accent-foreground: 180 22% 8%;
+
+    --destructive: 9 55% 56%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 180 14% 20%;
+    --input: 180 14% 20%;
+    --ring: 42 48% 55%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  /* Ledger-style headings use the display face sparingly, per design brief */
+  h1,
+  h2,
+  h3 {
+    @apply font-display;
+  }
+
+  /* Visible keyboard focus everywhere — accessibility floor */
+  :focus-visible {
+    @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
+  }
+}
+
+@layer utilities {
+  /* Tabular data — record IDs, survey numbers, confidence %, dates */
+  .font-tabular {
+    @apply font-mono tabular-nums;
+  }
+}

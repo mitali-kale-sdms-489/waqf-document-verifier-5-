@@ -1,0 +1,29 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+psycopg2-binary==2.9.9
+pydantic==2.9.2
+pydantic-settings==2.5.2
+email-validator==2.2.0    # required at runtime by pydantic's EmailStr (schemas.py,
+                           # schemas_admin.py) — was missing even though Segment 1
+                           # already used EmailStr; without this the app fails to
+                           # boot with "email-validator is not installed"
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.0
+python-multipart==0.0.9
+httpx==0.27.2
+pytesseract==0.3.13
+Pillow==10.4.0
+boto3==1.35.24
+python-dotenv==1.0.1
+alembic==1.13.2
+
+# --- Segment 2: OCR pipeline ---
+sarvamai>=0.1.9          # Sarvam Vision (primary OCR). Import is guarded in
+                          # app/services/ocr/sarvam_engine.py — the app still
+                          # starts and falls back to Tesseract if this or the
+                          # API key is missing.
+PyMuPDF==1.24.10          # optional: rasterizes page 1 of PDF uploads for
+                          # Tesseract/GPT-4o mini (Sarvam accepts PDF natively).
+                          # Import is guarded; PDF-only uploads still work via
+                          # Sarvam Vision alone if this isn't installed.
