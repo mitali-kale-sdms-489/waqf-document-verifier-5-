@@ -97,9 +97,10 @@ MANDATORY_FIELDS = [FieldName.property_id, FieldName.mutawalli_name, FieldName.s
 class ExtractionSource(str, enum.Enum):
     sarvam_vision = "sarvam_vision"
     tesseract = "tesseract"
-    shasan_slm = "shasan_slm"
+    shasan_slm = "shasan_slm"  # kept for old rows written before the Qwen swap; no longer produced
     gpt4o_mini = "gpt4o_mini"  # kept for old rows written before the Gemini swap; no longer produced
     gemini_vision = "gemini_vision"
+    qwen_slm = "qwen_slm"  # Qwen2.5 via local Ollama — replaced shasan_slm as the mapping-stage engine
     reconciled = "reconciled"
 
 
@@ -183,6 +184,13 @@ class ExtractedField(Base):
     document_id: Mapped[str] = mapped_column(ForeignKey("waqf_documents.id"), nullable=False)
     field_name: Mapped[FieldName] = mapped_column(Enum(FieldName), nullable=False)
     field_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # English transliteration/rendering of field_value (see
+    # app/services/ocr/gemini_engine.run_gemini_translation). Null for
+    # English/Latin-script documents, for records extracted before this
+    # column existed, or when the Gemini translation call failed/wasn't
+    # configured — always optional, never required for a document to be
+    # reviewed or approved.
+    field_value_en: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     source: Mapped[ExtractionSource] = mapped_column(Enum(ExtractionSource), nullable=False)
 

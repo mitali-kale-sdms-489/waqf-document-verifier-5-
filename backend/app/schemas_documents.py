@@ -31,6 +31,11 @@ class ExtractedFieldOut(CamelModel):
     document_id: str
     field_name: FieldName
     field_value: str | None
+    # English transliteration/rendering, populated by the Gemini translation
+    # pass (see app/services/ocr/gemini_engine.run_gemini_translation).
+    # None for English/Latin-script docs, pre-existing records, or a failed/
+    # unconfigured translation call.
+    field_value_en: str | None = None
     confidence: float
     source: ExtractionSource
 

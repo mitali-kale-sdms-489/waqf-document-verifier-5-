@@ -143,6 +143,7 @@ def upload_document(
                     document_id=document.id,
                     field_name=field_name,
                     field_value=reading.value,
+                    field_value_en=reading.value_en,
                     confidence=reading.confidence,
                     source=reading.source,
                 )

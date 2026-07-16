@@ -41,6 +41,7 @@ function makeField(
     documentId,
     fieldName,
     fieldValue,
+    fieldValueEn: null,
     confidence,
     source,
   };

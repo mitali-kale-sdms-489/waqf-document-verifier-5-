@@ -13,19 +13,24 @@ current-generation Flash model is, specifically so this doesn't need a code
 change every time a dated model ID is deprecated. Override via the
 GEMINI_MODEL env var if you want to pin a specific version instead.
 
-Two entry points, mirroring the old GPT-4o mini adapter's shape so
+Three entry points, the first two mirroring the old GPT-4o mini adapter's shape so
 pipeline.py's call sites barely changed:
   - run_gemini_ocr: raw page transcription, used as a fallback when Sarvam
     Vision's own confidence is low (see pipeline.py).
   - run_gemini_field_extraction: vision + JSON-schema prompt that reads the
     scan directly and returns the six Waqf record fields, used to backfill
     low-confidence fields the Shasan-SLM stub's regex pass couldn't resolve.
+  - run_gemini_translation: text-only pass over the final extracted field
+    values that returns an English transliteration/rendering of each,
+    used by pipeline.py to populate FieldReading.value_en for the review UI.
 """
 from __future__ import annotations
 
 import base64
 import json
 import logging
+import threading
+import time
 
 import httpx
 
@@ -38,6 +43,68 @@ settings = get_settings()
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 REQUEST_TIMEOUT = 25.0
+
+# Serializes + throttles every Gemini call this process makes, so a
+# document that needs OCR fallback, gap-fill, AND translation (up to 3
+# Gemini calls) doesn't burst them back-to-back and blow straight through
+# a free-tier requests-per-minute quota. `_last_call_at` is process-wide
+# (not per-document) since the quota itself is process/key-wide.
+_call_lock = threading.Lock()
+_last_call_at: float = 0.0
+
+
+def _throttle() -> None:
+    global _last_call_at
+    with _call_lock:
+        wait = settings.gemini_min_call_interval_seconds - (time.monotonic() - _last_call_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_call_at = time.monotonic()
+
+
+def _post_generate_content(body: dict) -> dict | None:
+    """POSTs `body` to the configured Gemini model's generateContent
+    endpoint, shared by every call site below (OCR, field extraction,
+    translation) so throttling and retry behavior only need to live in one
+    place. Retries on HTTP 429 up to `gemini_max_retries` times, honoring
+    the response's Retry-After header when present and falling back to
+    exponential backoff otherwise. Any other failure (timeout, other
+    4xx/5xx, connection error) is NOT retried — logged and treated as
+    "Gemini unavailable for this call", same as before. Never raises."""
+    if not settings.gemini_configured:
+        return None
+
+    url = f"{GEMINI_API_BASE}/{settings.gemini_model}:generateContent"
+    attempt = 0
+    while True:
+        _throttle()
+        try:
+            with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+                resp = client.post(url, params={"key": settings.gemini_api_key}, json=body)
+                resp.raise_for_status()
+                return resp.json()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 and attempt < settings.gemini_max_retries:
+                retry_after_header = exc.response.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after_header) if retry_after_header else None
+                except ValueError:
+                    delay = None
+                if delay is None:
+                    delay = settings.gemini_min_call_interval_seconds * (2**attempt)
+                attempt += 1
+                logger.warning(
+                    "Gemini (%s) rate-limited (429) — retrying in %.1fs (attempt %d/%d).",
+                    settings.gemini_model, delay, attempt, settings.gemini_max_retries,
+                )
+                time.sleep(delay)
+                continue
+            logger.warning("Gemini (%s) call failed: %s", settings.gemini_model, exc)
+            return None
+        except Exception as exc:  # noqa: BLE001 - any other transport/parse failure must not crash the pipeline
+            logger.warning("Gemini (%s) call failed: %s", settings.gemini_model, exc)
+            return None
+
 
 FIELD_EXTRACTION_PROMPT = """You are transcribing a scanned Waqf (Islamic endowment) property registration \
 record, written in Urdu (Nastaliq script), Marathi, Hindi, or Sanskrit (all Devanagari script), or English. \
@@ -62,9 +129,6 @@ without translating between them."""
 
 
 def _generate_content(raw_bytes: bytes, mime_type: str | None, prompt: str, *, json_response: bool) -> dict | None:
-    if not settings.gemini_configured:
-        return None
-
     mime = mime_type if mime_type and (mime_type.startswith("image/") or mime_type == "application/pdf") else "image/png"
     b64 = base64.b64encode(raw_bytes).decode("ascii")
 
@@ -82,17 +146,7 @@ def _generate_content(raw_bytes: bytes, mime_type: str | None, prompt: str, *, j
             **({"responseMimeType": "application/json"} if json_response else {}),
         },
     }
-
-    url = f"{GEMINI_API_BASE}/{settings.gemini_model}:generateContent"
-
-    try:
-        with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
-            resp = client.post(url, params={"key": settings.gemini_api_key}, json=body)
-            resp.raise_for_status()
-            return resp.json()
-    except Exception as exc:
-        logger.warning("Gemini (%s) call failed: %s", settings.gemini_model, exc)
-        return None
+    return _post_generate_content(body)
 
 
 def _extract_text(data: dict) -> str | None:
@@ -118,6 +172,74 @@ def run_gemini_ocr(raw_bytes: bytes, mime_type: str | None) -> RawTextResult:
                               error="Unexpected Gemini response shape")
     text = text.strip()
     return RawTextResult(text=text, engine=ExtractionSource.gemini_vision, confidence=0.7 if text else 0.0)
+
+
+TRANSLATION_PROMPT = """You are helping an English-speaking reviewer read Waqf (Islamic endowment) property \
+registration fields that were transcribed in their original script (Urdu Nastaliq, or Devanagari — Marathi, \
+Hindi, or Sanskrit).
+
+For each field value below, give its English rendering:
+- For a person's name or a place name (mutawalli_name, village): give a TRANSLITERATION — how the name reads \
+aloud in English/Latin letters (e.g. "حاجی محمد رفیق" -> "Haji Muhammad Rafiq"), NOT a meaning-based \
+translation. Use common, natural English spellings for Muslim/South Asian names rather than a rigid \
+letter-by-letter romanization.
+- For property_id and survey_number: convert any Urdu-Indic or Devanagari digits to plain Western (0-9) \
+digits; if the value is already in Western digits/Latin letters, return it unchanged.
+- For registration_date: return it unchanged if already ISO (YYYY-MM-DD) or otherwise render any non-Latin \
+digits as Western digits.
+- For extent: convert any non-Latin digits to Western digits and transliterate the unit word (e.g. "کنال" \
+-> "kanal", "مرلہ" -> "marla") rather than translating it to a different unit.
+
+Respond with ONLY a JSON object, no prose, no markdown fences, whose keys are exactly the field names given \
+below (only include keys for fields provided) and whose values are the English rendering as a string. If a \
+provided value cannot be confidently rendered in English, return null for that key rather than guessing.
+
+FIELDS:
+{fields_json}
+"""
+
+
+def run_gemini_translation(fields: FieldReadings) -> dict[FieldName, str] | None:
+    """Best-effort English transliteration/translation pass over whatever
+    field values were extracted, run as a separate text-only Gemini call
+    (see pipeline.py, called after mapping + gap-fill). Returns None (not
+    an empty dict) when the call fails or isn't configured, so pipeline.py
+    can tell "translation didn't run" apart from "ran and had nothing to
+    translate" — same convention as run_gemini_field_extraction above.
+    Never raises."""
+    present = {f.value: r.value for f, r in fields.items() if r.value}
+    if not present:
+        return None
+    if not settings.gemini_configured:
+        return None
+
+    prompt = TRANSLATION_PROMPT.format(fields_json=json.dumps(present, ensure_ascii=False, indent=2))
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
+    }
+    data = _post_generate_content(body)
+    if not data:
+        return None
+
+    content = _extract_text(data)
+    if content is None:
+        logger.warning("Unexpected Gemini response shape for translation")
+        return None
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError as exc:
+        logger.warning("Could not parse Gemini translation response: %s", exc)
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    result: dict[FieldName, str] = {}
+    for field in fields:
+        value = parsed.get(field.value)
+        if isinstance(value, str) and value.strip():
+            result[field] = value.strip()
+    return result
 
 
 def run_gemini_field_extraction(raw_bytes: bytes, mime_type: str | None) -> FieldReadings | None:

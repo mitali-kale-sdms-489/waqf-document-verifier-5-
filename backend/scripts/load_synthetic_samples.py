@@ -120,6 +120,7 @@ def load_documents(db, manifest_docs: list[dict], synthetic_dir: Path, reviewer_
                     document_id=document.id,
                     field_name=field_name,
                     field_value=reading.value,
+                    field_value_en=reading.value_en,
                     confidence=reading.confidence,
                     source=reading.source,
                 )

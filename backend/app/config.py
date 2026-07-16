@@ -30,9 +30,29 @@ class Settings(BaseSettings):
 
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-flash-latest"  # alias Google keeps pointed at their current Flash model
+    # Free-tier Gemini quotas are easy to hit once a document can trigger
+    # up to 3 calls (OCR fallback, field-extraction gap-fill, translation).
+    # gemini_max_retries: extra attempts on a 429, honoring Retry-After
+    # when the API sends one. gemini_min_call_interval_seconds: a floor on
+    # the gap between consecutive Gemini calls from this process, to avoid
+    # bursting past a requests-per-minute cap in the first place rather
+    # than only reacting after a 429. Both overridable via env vars.
+    gemini_max_retries: int = 2
+    gemini_min_call_interval_seconds: float = 4.5
 
     shasan_slm_api_url: str | None = None
     shasan_slm_api_key: str | None = None
+
+    # Qwen2.5 field-extraction mapper, served locally via Ollama. Replaces
+    # the shasan_stub regex mapper as the pipeline's mapping stage.
+    ollama_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b"
+    # 120s default rather than a shorter "should be plenty" number: a 7B
+    # model on CPU-only hardware, or a cold call before Ollama has the
+    # model loaded into memory, can easily take well over a minute.
+    # Override with a lower value once you've measured your own hardware's
+    # typical response time (see `ollama ps` / a manual timed curl call).
+    ollama_timeout_seconds: float = 120.0
 
     # AWS S3 (optional file storage)
     aws_access_key_id: str | None = None

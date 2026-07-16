@@ -43,6 +43,19 @@ def _migrate_ocr_settings_columns() -> None:
             conn.execute(text("ALTER TABLE ocr_settings ADD COLUMN ocr_fallback_threshold FLOAT DEFAULT 0.6"))
 
 
+def _migrate_extracted_fields_columns() -> None:
+    """Same rationale as _migrate_ocr_settings_columns above — adds
+    field_value_en to any extracted_fields table that pre-dates the
+    English-translation feature."""
+    inspector = inspect(engine)
+    if "extracted_fields" not in inspector.get_table_names():
+        return
+    existing_columns = {col["name"] for col in inspector.get_columns("extracted_fields")}
+    if "field_value_en" not in existing_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE extracted_fields ADD COLUMN field_value_en TEXT"))
+
+
 def _migrate_enum_values(table: str, column: str, required_values: set[str]) -> None:
     """Postgres backs `Enum(...)` columns with a real native ENUM type when
     the table is freshly created via `Base.metadata.create_all`, and that
@@ -130,6 +143,7 @@ def on_startup() -> None:
     # add the routers that read/write the rest of this schema.
     Base.metadata.create_all(bind=engine)
     _migrate_ocr_settings_columns()
+    _migrate_extracted_fields_columns()
     _migrate_enum_values("extracted_fields", "source", {"gemini_vision"})
     _migrate_enum_values("ocr_settings", "primary_engine", {"gemini_vision"})
     _migrate_enum_values("waqf_documents", "script_type", {"hindi_devanagari", "sanskrit_devanagari"})

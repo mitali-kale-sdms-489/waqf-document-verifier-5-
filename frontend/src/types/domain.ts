@@ -116,14 +116,23 @@ export interface ExtractedField {
   documentId: string;
   fieldName: FieldName;
   fieldValue: string | null;
+  /** English transliteration/rendering of fieldValue, produced by a Gemini
+   *  translation pass at extraction time (see backend
+   *  gemini_engine.run_gemini_translation). Null for English/Latin-script
+   *  documents, records extracted before this existed, or a failed/
+   *  unconfigured translation call — always optional. */
+  fieldValueEn: string | null;
   confidence: number;
   /** Which engine produced this read. sarvam_vision = Sarvam Vision 3B (primary,
    *  esp. Urdu Nastaliq), tesseract = Tesseract urd+mar / Surya fallback,
-   *  shasan_slm = Shasan-SLM extraction-assist pass (Pod B), gemini_vision = the
-   *  vision-extraction fallback engine (replaced gpt4o_mini, which is kept here
-   *  only so older records still type-check), reconciled = a human
-   *  correction recorded during review. */
-  source: "sarvam_vision" | "tesseract" | "shasan_slm" | "gpt4o_mini" | "gemini_vision" | "reconciled";
+   *  shasan_slm = the old Shasan-SLM regex extraction-assist pass (Pod B; kept
+   *  here only so older records still type-check, no longer produced),
+   *  qwen_slm = Qwen2.5 running locally via Ollama, the current mapping-stage
+   *  engine that replaced shasan_slm, gemini_vision = the vision-extraction
+   *  fallback engine (replaced gpt4o_mini, which is kept here only so older
+   *  records still type-check), reconciled = a human correction recorded
+   *  during review. */
+  source: "sarvam_vision" | "tesseract" | "shasan_slm" | "qwen_slm" | "gpt4o_mini" | "gemini_vision" | "reconciled";
 }
 
 export type ValidationRuleResult = "pass" | "fail" | "warning";
