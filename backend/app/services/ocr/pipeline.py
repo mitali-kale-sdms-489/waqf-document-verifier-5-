@@ -41,7 +41,15 @@ from dataclasses import dataclass
 from app.config import get_settings
 from app.models import ExtractionSource, FieldName, ScriptType
 from . import gemini_engine, qwen_mapper, sarvam_engine, tesseract_engine
-from .base import SCRIPT_SENSITIVE_FIELDS, FieldReading, FieldReadings, RawTextResult, looks_transliterated
+from .base import (
+    SCRIPT_SENSITIVE_FIELDS,
+    FieldReading,
+    FieldReadings,
+    RawTextResult,
+    convert_indic_digits,
+    foreign_script_block,
+    looks_transliterated,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -87,6 +95,32 @@ def _guard_against_transliterated_values(
             reading.value = None
             reading.confidence = min(reading.confidence, 0.2)
 
+    # Wrong-native-script guard — e.g. a mutawalli_name or village read
+    # back in Urdu Nastaliq on a document whose script_type is Sanskrit/
+    # Hindi/Marathi Devanagari, or vice versa. Checked across every field:
+    # qwen_mapper.py already tries to catch and retry this itself right
+    # where the OCR text is on hand, and Gemini's gap-fill has its own shot
+    # at low-confidence fields too — this is the final backstop if a
+    # wrong-script value still made it this far. Same treatment as the
+    # Latin-transliteration case above: clear the value for manual entry
+    # rather than leave a fluent-looking but wrong-script reading in place.
+    for field in FieldName:
+        reading = fields.get(field)
+        if reading is None or not reading.value:
+            continue
+        wrong_block = foreign_script_block(reading.value, script_type)
+        if wrong_block is None:
+            continue
+        notes.append(
+            f"{field.value}: engine returned a {wrong_block}-script reading ('{reading.value}') for a "
+            f"{script_type.value} document — this document's script doesn't use that script at all, so "
+            "this was almost certainly read using the wrong language/script and has been cleared for "
+            "manual entry."
+        )
+        reading.value_en = reading.value_en or reading.value
+        reading.value = None
+        reading.confidence = min(reading.confidence, 0.2)
+
 
 @dataclass
 class PipelineResult:
@@ -110,7 +144,16 @@ def _run_primary_ocr(
     # the primary transcription. Commonly empty if the urd/mar/eng language
     # packs aren't installed — that's fine, it's only a hint at this stage.
     quick = tesseract_engine.run_tesseract(raw_bytes, mime_type)
-    early_hint = tesseract_engine.detect_script(quick.text) or tesseract_engine.detect_script_from_filename(filename)
+    # min_evidence=5: this hint feeds Sarvam Vision's *language* parameter
+    # for its read of the whole page, so a noisy low-quality quick pass
+    # misreading a handful of stray characters shouldn't be enough to bias
+    # Sarvam into reading e.g. a Sanskrit scan as Urdu. Re-detection from
+    # the winning engine's own (much higher-quality) output below stays at
+    # the default, more lenient threshold.
+    early_hint = (
+        tesseract_engine.detect_script(quick.text, min_evidence=5)
+        or tesseract_engine.detect_script_from_filename(filename)
+    )
     if not early_hint:
         notes.append("No script hint available before OCR (Tesseract produced no text and filename didn't "
                       "indicate one) — requesting Sarvam Vision with a Hindi default; scriptType will be "
@@ -180,7 +223,55 @@ def _run_primary_ocr(
     elif needs_comparison and len(candidates) > 1:
         notes.append(f"Sarvam Vision remained the best/tied result ({best.confidence:.2f}) and was used.")
 
-    return best, _final_script(best.text), notes
+    final_script = _final_script(best.text)
+
+    # Correction pass: if Sarvam won but was asked for the wrong script
+    # family (Sarvam takes a language, e.g. "ur-IN", and reads accordingly
+    # — if that language disagrees with what the text it actually returned
+    # is written in, that's a real "read in the wrong language" event, not
+    # just a labeling detail). This is exactly the "Sanskrit document
+    # requested/read as Urdu" failure mode: the requested_family below
+    # would be "arabic" (from an early_hint that misfired) while the text
+    # Sarvam actually returned is majority Devanagari. One corrected re-run
+    # is attempted; if it succeeds and its own text is self-consistent, it
+    # replaces the original Sarvam read (and, since re-running was already
+    # worth doing, is preferred over Tesseract/Gemini candidates even if
+    # one of those scored marginally higher, since it's now known to be in
+    # the right language).
+    _SCRIPT_FAMILY = {
+        ScriptType.urdu_nastaliq: "arabic",
+        ScriptType.marathi_devanagari: "devanagari",
+        ScriptType.hindi_devanagari: "devanagari",
+        ScriptType.sanskrit_devanagari: "devanagari",
+        ScriptType.english_latin: "latin",
+    }
+    requested_language_script = early_hint or ScriptType.hindi_devanagari
+    if (
+        best.engine == ExtractionSource.sarvam_vision
+        and _SCRIPT_FAMILY.get(requested_language_script) != _SCRIPT_FAMILY.get(final_script)
+        and _SCRIPT_FAMILY.get(final_script) in ("arabic", "devanagari")
+    ):
+        notes.append(
+            f"Sarvam Vision was requested in {requested_language_script.value} but its own returned text "
+            f"reads as {final_script.value} — re-running Sarvam Vision with the corrected language."
+        )
+        corrected_result = sarvam_engine.run_sarvam_vision(raw_bytes, filename, final_script)
+        if corrected_result.ok:
+            recorrected_script = _final_script(corrected_result.text)
+            if _SCRIPT_FAMILY.get(recorrected_script) == _SCRIPT_FAMILY.get(final_script):
+                notes.append(
+                    f"Corrected-language Sarvam Vision re-run succeeded (confidence "
+                    f"{corrected_result.confidence:.2f}) and was used instead."
+                )
+                best = corrected_result
+                final_script = recorrected_script
+            else:
+                notes.append("Corrected-language Sarvam Vision re-run was inconsistent too — keeping original read.")
+        else:
+            notes.append(f"Corrected-language Sarvam Vision re-run failed ({corrected_result.error}) — "
+                          "keeping original read.")
+
+    return best, final_script, notes
 
 
 def process_document(
@@ -225,22 +316,52 @@ def process_document(
     if script_type != ScriptType.english_latin:
         _guard_against_transliterated_values(fields, script_type, notes)
 
-    # Translation pass: best-effort English transliteration of whatever got
-    # extracted, via Gemini (see gemini_engine.run_gemini_translation).
-    # Skipped entirely for documents already in English/Latin script —
-    # there's nothing to translate. Gemini not configured, or the call
-    # failing, just leaves value_en as None on every field; it never blocks
-    # or fails the pipeline.
-    if script_type != ScriptType.english_latin and settings.gemini_configured:
-        translations = gemini_engine.run_gemini_translation(fields)
-        if translations:
-            for field, value_en in translations.items():
-                fields[field].value_en = value_en
-            notes.append("Gemini translation pass populated English renderings for: "
-                         + ", ".join(f.value for f in translations))
+    # Translation pass: best-effort English rendering of whatever got
+    # extracted. Two layers: Gemini (real transliteration for names/
+    # places, plus smart digit/date normalization) when configured and
+    # reachable, plus a local, dependency-free digit-conversion fallback
+    # for the numeric/date-shaped fields (property_id, survey_number,
+    # registration_date, extent) so a translation still shows up for at
+    # least those fields even when Gemini is unreachable (bad/expired key,
+    # quota, network). Previously a single failed Gemini call meant EVERY
+    # field's value_en stayed None with no indication why, which is what
+    # made "no translation ever appears" look like a missing feature
+    # rather than a call failure. Skipped entirely for documents already
+    # in English/Latin script — there's nothing to translate.
+    if script_type != ScriptType.english_latin:
+        translations: dict[FieldName, str] | None = None
+        if settings.gemini_configured:
+            translations = gemini_engine.run_gemini_translation(fields)
+            if translations:
+                for field, value_en in translations.items():
+                    fields[field].value_en = value_en
+                notes.append("Gemini translation pass populated English renderings for: "
+                             + ", ".join(f.value for f in translations))
+            else:
+                notes.append("Gemini translation pass attempted but returned nothing (call failed, or no "
+                             "fields to translate) — falling back to local digit conversion for "
+                             "numeric/date fields where possible.")
         else:
-            notes.append("Gemini translation pass attempted but returned nothing (call failed, not "
-                         "configured, or no fields to translate).")
+            notes.append("Gemini not configured — no name/place transliteration available; falling back to "
+                         "local digit conversion for numeric/date fields where possible.")
+
+        # Local, offline fallback — only for the fields that are
+        # legitimately just digits/dates (never mutawalli_name/village,
+        # which need a genuine transliteration a regex can't provide) and
+        # only where Gemini didn't already populate value_en above.
+        locally_converted: list[str] = []
+        for field in FieldName:
+            if field in SCRIPT_SENSITIVE_FIELDS:
+                continue
+            reading = fields.get(field)
+            if reading is None or not reading.value or reading.value_en:
+                continue
+            converted = convert_indic_digits(reading.value)
+            if converted:
+                reading.value_en = converted
+                locally_converted.append(field.value)
+        if locally_converted:
+            notes.append("Local digit conversion populated English renderings for: " + ", ".join(locally_converted))
 
     overall_confidence = round(sum(r.confidence for r in fields.values()) / len(fields), 4)
 

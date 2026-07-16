@@ -109,6 +109,14 @@ export interface WaqfDocument {
   mimeType?: string | null;
   /** Original file size in bytes, shown in the upload list. */
   fileSizeBytes?: number | null;
+  /**
+   * Newline-separated OCR pipeline diagnostics: which engine won, any
+   * script-hint corrections that were made (e.g. Sarvam re-run in the
+   * corrected language), and why the translation pass did or didn't
+   * populate fieldValueEn on each field. Null for records saved before
+   * this was tracked. See Review.tsx's diagnostics panel.
+   */
+  extractionNotes?: string | null;
 }
 
 export interface ExtractedField {

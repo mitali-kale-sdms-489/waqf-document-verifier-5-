@@ -145,6 +145,18 @@ class WaqfDocument(Base):
         nullable=True,
     )
 
+    # Newline-joined copy of the OCR pipeline's engine_notes (see
+    # services/ocr/pipeline.py's PipelineResult.engine_notes) — which
+    # engine won, any script-hint corrections that were made, and why the
+    # translation pass did or didn't populate value_en. Previously this
+    # only existed transiently in the upload response (UploadResult.
+    # diagnostics.notes) and was lost the moment you navigated away from
+    # the upload screen, which made "why didn't translation show up on
+    # this document" impossible to answer later from the Review screen —
+    # persisting it here is what src/pages/Review.tsx's diagnostics panel
+    # reads from.
+    extraction_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Stores either a local file path (development)
     # or an S3 object key such as:
     # uploads/2026/07/document123.pdf

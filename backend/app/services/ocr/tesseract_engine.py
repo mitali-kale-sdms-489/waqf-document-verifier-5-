@@ -138,17 +138,29 @@ def _classify_devanagari(text: str) -> ScriptType | None:
     return None
 
 
-def detect_script(text: str) -> ScriptType | None:
+def detect_script(text: str, min_evidence: int = 1) -> ScriptType | None:
     """Returns None when there isn't enough signal (e.g. empty/garbled
-    text) so the caller can fall back to a default instead of trusting a
-    zero-evidence guess.
+    text, or fewer than `min_evidence` matching characters) so the caller
+    can fall back to a default instead of trusting a low-evidence guess.
 
     Counts evidence for the Devanagari block, the Arabic block, and Latin
     letters and picks whichever has the most; a Devanagari win is then
     disambiguated into Marathi/Hindi/Sanskrit via `_classify_devanagari`.
     Previously this only weighed Devanagari vs. Arabic, so a plain-Latin/
     English document (zero of either) fell through to a default that could
-    land on Urdu, which is what was mislabeling English scans."""
+    land on Urdu, which is what was mislabeling English scans.
+
+    `min_evidence` defaults to 1 (any signal at all) for callers
+    re-detecting from a winning engine's full transcription, where a
+    single matching character is already reasonably meaningful. Callers
+    using this on a noisy, low-quality quick-pass OCR read purely as a
+    *hint* for another engine's language parameter should pass a higher
+    threshold — a single misread/garbled character from a low-confidence
+    Tesseract pass was, before this, enough to send e.g. Sarvam Vision an
+    Urdu language hint for what was actually a Sanskrit/Devanagari scan,
+    which then produces fluent-looking Nastaliq text for name/place
+    fields (see pipeline.py's early_hint usage and the corresponding
+    foreign-script guard in base.py/qwen_mapper.py)."""
     if not text:
         return None
 
@@ -166,7 +178,7 @@ def detect_script(text: str) -> ScriptType | None:
         ScriptType.english_latin: latin,
     }
     best_key, best_count = max(counts.items(), key=lambda kv: kv[1])
-    if best_count == 0:
+    if best_count < min_evidence:
         return None
     if best_key == "devanagari":
         return _classify_devanagari(text)

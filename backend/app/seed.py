@@ -119,10 +119,37 @@ def seed_ocr_settings(db: Session) -> None:
 
 
 def seed_cer_benchmark(db: Session) -> None:
-    if db.query(CerBenchmarkEntry).first():
-        return
-    for e in CER_BENCHMARK_DEFAULTS:
-        db.add(CerBenchmarkEntry(**e))
+    """Reconciles against CER_BENCHMARK_DEFAULTS by (script_type, engine)
+    key, rather than the previous "if the table has any row at all, skip
+    everything" guard. That blanket skip meant that when GPT-4o mini was
+    swapped for Gemini Vision as the fallback engine, CER_BENCHMARK_DEFAULTS
+    below was updated to say "gemini_vision", but the already-seeded
+    "gpt4o_mini" rows from before that swap were never touched again — they
+    just sat in the table forever, showing up in the admin CER benchmark
+    table with a blank engine name (the frontend's engine-label lookup has
+    no entry for a retired engine key) next to an otherwise-normal CER%
+    and sample size.
+
+    This runs on every startup (see main.py) and: inserts any
+    (script_type, engine) pair from CER_BENCHMARK_DEFAULTS that's missing,
+    updates cer/sample_size for a pair that already exists with different
+    values, and deletes any row whose (script_type, engine) pair is no
+    longer in CER_BENCHMARK_DEFAULTS at all — exactly what should have
+    happened to the gpt4o_mini rows when that engine was retired."""
+    existing = {(e.script_type, e.engine): e for e in db.query(CerBenchmarkEntry).all()}
+    wanted_keys = set()
+    for d in CER_BENCHMARK_DEFAULTS:
+        key = (d["script_type"], d["engine"])
+        wanted_keys.add(key)
+        row = existing.get(key)
+        if row is None:
+            db.add(CerBenchmarkEntry(**d))
+        elif row.cer != d["cer"] or row.sample_size != d["sample_size"]:
+            row.cer = d["cer"]
+            row.sample_size = d["sample_size"]
+    for key, row in existing.items():
+        if key not in wanted_keys:
+            db.delete(row)
     db.commit()
 
 

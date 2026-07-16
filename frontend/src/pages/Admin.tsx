@@ -502,7 +502,7 @@ function CerBenchmarkPanel() {
                   <tbody>
                     {rows.map((row) => (
                       <tr key={row.engine} className="border-b border-border last:border-b-0">
-                        <td className="px-4 py-2">{benchmark.engineLabels[row.engine]}</td>
+                        <td className="px-4 py-2">{benchmark.engineLabels[row.engine] ?? row.engine}</td>
                         <td className="px-4 py-2 font-tabular">{(row.cer * 100).toFixed(1)}%</td>
                         <td className="px-4 py-2 font-tabular text-muted-foreground">{row.sampleSize} docs</td>
                         <td className="px-4 py-2">

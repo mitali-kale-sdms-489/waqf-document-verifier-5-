@@ -286,6 +286,22 @@ export function Review() {
         )}
       </div>
 
+      {current.extractionNotes && (
+        <details className="rounded-lg border border-border bg-card px-4 py-3 text-sm">
+          <summary className="cursor-pointer font-medium text-muted-foreground select-none">
+            Extraction diagnostics
+          </summary>
+          <ul className="mt-2 space-y-1 list-disc pl-5 text-xs text-muted-foreground">
+            {current.extractionNotes
+              .split("\n")
+              .filter(Boolean)
+              .map((note, i) => (
+                <li key={i}>{note}</li>
+              ))}
+          </ul>
+        </details>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <DocumentPreview doc={current} />
 

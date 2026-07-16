@@ -136,6 +136,7 @@ def upload_document(
         document.script_type = result.script_type
         document.overall_confidence = result.overall_confidence
         document.status = DocumentStatus.extracted
+        document.extraction_notes = "\n".join(result.engine_notes)
 
         for field_name, reading in result.fields.items():
             db.add(
@@ -158,6 +159,7 @@ def upload_document(
         logger.exception("OCR pipeline failed for document %s", document.id)
         document.status = DocumentStatus.flagged
         document.overall_confidence = None
+        document.extraction_notes = f"OCR pipeline raised an unhandled error: {exc}"
         diagnostics = UploadDiagnostics(
             primary_engine=ExtractionSource.tesseract,
             notes=[f"OCR pipeline raised an unhandled error: {exc}"],

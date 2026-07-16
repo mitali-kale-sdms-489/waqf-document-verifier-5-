@@ -62,6 +62,12 @@ class WaqfDocumentOut(CamelModel):
     preview_url: str | None = None
     mime_type: str | None
     file_size_bytes: int | None
+    # Newline-joined OCR pipeline diagnostics (which engine won, any
+    # script-hint corrections, why the translation pass did/didn't
+    # populate field_value_en) — see WaqfDocument.extraction_notes in
+    # app/models.py. Optional/None for pre-existing records saved before
+    # this was tracked.
+    extraction_notes: str | None = None
 
 
 class DocumentDetailOut(CamelModel):

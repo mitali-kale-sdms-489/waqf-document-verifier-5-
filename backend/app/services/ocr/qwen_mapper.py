@@ -38,7 +38,7 @@ import httpx
 
 from app.config import get_settings
 from app.models import ExtractionSource, FieldName, ScriptType
-from .base import SCRIPT_SENSITIVE_FIELDS, FieldReading, FieldReadings, looks_transliterated
+from .base import SCRIPT_SENSITIVE_FIELDS, FieldReading, FieldReadings, foreign_script_block, looks_transliterated
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -92,6 +92,20 @@ were asked to copy the original script exactly, not romanize it.
 Look again at the OCR text and find where {field_name} appears. Respond with ONLY that value, copied \
 character-for-character in its original script, no JSON, no quotes, no explanation. If you genuinely cannot \
 find it written in the text, respond with exactly: NONE
+
+OCR TEXT:
+
+{ocr_text}
+"""
+
+_FOREIGN_SCRIPT_RETRY_PROMPT_TEMPLATE = """Your previous answer for the field "{field_name}" was "{wrong_value}", \
+but that appears to be written in a different script than this document actually uses. This document's script \
+is {script_type}, but that answer looks like {wrong_block} script instead — you may have copied text from the \
+wrong part of the page, or the wrong language/script entirely.
+
+Look again at the OCR text below and find where {field_name} actually appears, written in {script_type}. \
+Respond with ONLY that value, copied character-for-character in the document's own script, no JSON, no \
+quotes, no explanation. If you genuinely cannot find it written in the text, respond with exactly: NONE
 
 OCR TEXT:
 
@@ -217,6 +231,29 @@ def _retry_native_script_field(ocr_text: str, field: FieldName, wrong_value: str
     return response_text
 
 
+def _retry_foreign_script_field(
+    ocr_text: str, field: FieldName, wrong_value: str, script_type: ScriptType, wrong_block: str
+) -> str | None:
+    """One corrective follow-up call, scoped to a single field, used when
+    Qwen's first answer came back in a different non-Latin script than the
+    document's own (e.g. Urdu Nastaliq text for a field on a Sanskrit/
+    Devanagari document) — a distinct failure mode from the
+    Latin-transliteration one _retry_native_script_field handles, since
+    the wrong-script answer isn't Latin at all and so isn't caught by
+    looks_transliterated. Returns the corrected value, or None if the
+    retry also failed / the model responded NONE / errored out."""
+    prompt = _FOREIGN_SCRIPT_RETRY_PROMPT_TEMPLATE.format(
+        field_name=field.value, wrong_value=wrong_value, script_type=script_type.value, wrong_block=wrong_block,
+        ocr_text=ocr_text,
+    )
+    response_text = _call_ollama_plain(prompt)
+    if response_text is None:
+        return None
+    if response_text.strip().upper() == "NONE":
+        return None
+    return response_text
+
+
 def _to_field_readings(parsed: dict) -> FieldReadings:
     readings: FieldReadings = {}
     for field in FieldName:
@@ -284,6 +321,37 @@ def extract_fields(raw_text: str, script_type: ScriptType | None = None) -> Fiel
                 # at Qwen's normal 0.90. If Gemini's attempt also comes
                 # back transliterated, pipeline.py's post-gap-fill guard
                 # is the final safety net.
+                reading.confidence = min(reading.confidence, 0.35)
+
+        # Wrong-native-script check — e.g. Urdu Nastaliq text on a document
+        # whose script_type is Sanskrit/Hindi/Marathi Devanagari, or the
+        # reverse. Checked across every field (not just the name/place
+        # ones above): a field legitimately containing Western digits/
+        # Latin letters is normal even on a non-Latin document, but Arabic
+        # letters showing up in a Devanagari document's *any* field (or
+        # vice versa) is never legitimate, only ever a sign the wrong
+        # script/language was used to read that part of the page.
+        for field in FieldName:
+            reading = readings.get(field)
+            if reading is None or not reading.value:
+                continue
+            wrong_block = foreign_script_block(reading.value, script_type)
+            if wrong_block is None:
+                continue
+            logger.info(
+                "Qwen returned a %s-script value for %s ('%s') on a %s document — retrying.",
+                wrong_block, field.value, reading.value, script_type.value,
+            )
+            corrected = _retry_foreign_script_field(text, field, reading.value, script_type, wrong_block)
+            if corrected and foreign_script_block(corrected, script_type) is None:
+                readings[field] = FieldReading(
+                    value=corrected, confidence=PRESENT_CONFIDENCE - 0.10, source=ExtractionSource.qwen_slm
+                )
+            else:
+                # Same treatment as the transliteration case: don't let a
+                # wrong-script value sit at high confidence. Drop it below
+                # GAP_FILL_THRESHOLD so Gemini's vision-based backfill gets
+                # an independent shot at this field.
                 reading.confidence = min(reading.confidence, 0.35)
 
     return readings
