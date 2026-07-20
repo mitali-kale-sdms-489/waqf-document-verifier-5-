@@ -62,6 +62,11 @@ ACCEPTED_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/tiff", "a
 ACCEPTED_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".pdf")
 MAX_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB — matches Upload.tsx
 
+# A flagged document gets this many reupload attempts (on top of the
+# original upload) before a reviewer is told to visit the office in person
+# with the original document. Matches Upload.tsx's STARTING_REUPLOAD_ATTEMPTS.
+MAX_REUPLOAD_ATTEMPTS = 3
+
 
 def _is_accepted_file(filename: str, content_type: str | None) -> bool:
     if content_type in ACCEPTED_MIME_TYPES:
@@ -203,6 +208,76 @@ def upload_document(
     # before we return, so a client that starts polling immediately after
     # getting this response always finds something. The slow part (OCR)
     # happens after the response is sent; see _run_ocr_pipeline above.
+    db.commit()
+    db.refresh(document)
+
+    background_tasks.add_task(_run_ocr_pipeline, document.id, raw_bytes, file.filename, file.content_type)
+
+    return UploadResponse(
+        document=_to_out(document, preview_token=_upload_preview_token(current_user)),
+        fields=[],
+        diagnostics=None,
+    )
+
+
+@router.post("/{document_id}/reupload", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
+def reupload_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UploadResponse:
+    """Replaces the file behind a flagged document and re-runs the OCR
+    pipeline against it, capped at MAX_REUPLOAD_ATTEMPTS total attempts
+    (see Dashboard.tsx's "Flagged for review" dialog). Unlike
+    /documents/upload this does not create a new document row — it reuses
+    document_id so the document's review history, id, and any place it's
+    already linked from stay intact; only the file, extraction, and
+    validation state are replaced."""
+    document = db.get(WaqfDocument, document_id)
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found.")
+
+    if document.reupload_count >= MAX_REUPLOAD_ATTEMPTS:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{MAX_REUPLOAD_ATTEMPTS} attempts done. Please visit the office.",
+        )
+
+    if not file.filename or not _is_accepted_file(file.filename, file.content_type):
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            "Unsupported file type. Use JPG, PNG, TIFF, WEBP, or PDF.",
+        )
+
+    raw_bytes = file.file.read()
+    if len(raw_bytes) > MAX_SIZE_BYTES:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "File is larger than the 25 MB limit.")
+    if len(raw_bytes) == 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Uploaded file is empty.")
+
+    dpdp_status, dpdp_reason = dpdp.check_dpdp_compliance(file.filename)
+
+    storage_path = storage.save_upload(document.id, file, raw_bytes)
+
+    # Clear out the previous attempt's fields/validations — they belong to
+    # the old file and would otherwise sit alongside (or be confused with)
+    # the new OCR pass's results.
+    db.query(ExtractedField).filter(ExtractedField.document_id == document.id).delete()
+    db.query(ValidationResult).filter(ValidationResult.document_id == document.id).delete()
+
+    document.filename = file.filename
+    document.status = DocumentStatus.processing
+    document.storage_path = storage_path
+    document.mime_type = file.content_type
+    document.file_size_bytes = len(raw_bytes)
+    document.dpdp_status = dpdp_status
+    document.dpdp_reason = dpdp_reason
+    document.overall_confidence = None
+    document.extraction_notes = None
+    document.reupload_count += 1
+
     db.commit()
     db.refresh(document)
 

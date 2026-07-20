@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { format } from "date-fns";
+import toast from "react-hot-toast";
 import {
+  Building2,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -12,6 +14,7 @@ import {
   Gauge,
   Languages,
   Loader2,
+  RotateCcw,
   Search,
   X,
 } from "lucide-react";
@@ -21,11 +24,14 @@ import {
   getDashboardStats,
   getFlagReason,
   getTranslateLanguages,
+  pollDocumentUntilReady,
+  reuploadDocument,
   translateText,
   type DashboardStats,
   type SupportedLanguage,
 } from "@/api/documents";
 import {
+  MAX_REUPLOAD_ATTEMPTS,
   SCRIPT_TYPE_LABELS,
   SCRIPT_TYPE_SHORT_LABELS,
   confidenceBand,
@@ -78,6 +84,15 @@ type StatusFilter = "all" | "pending" | "approved" | "flagged";
 const PENDING_STATUSES: DocumentStatus[] = ["uploaded", "processing", "extracted", "validated"];
 const APPROVED_STATUSES: DocumentStatus[] = ["approved", "reviewed"];
 
+const REUPLOAD_ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/tiff", "application/pdf"];
+const REUPLOAD_ACCEPTED_EXT = ".png,.jpg,.jpeg,.webp,.tif,.tiff,.pdf";
+const REUPLOAD_MAX_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB — matches Upload.tsx
+
+function isReuploadAcceptedFile(file: File): boolean {
+  if (REUPLOAD_ACCEPTED_TYPES.includes(file.type)) return true;
+  return /\.(png|jpe?g|webp|tif|tiff|pdf)$/i.test(file.name);
+}
+
 function matchesStatusFilter(status: DocumentStatus, filter: StatusFilter): boolean {
   if (filter === "all") return true;
   if (filter === "pending") return PENDING_STATUSES.includes(status);
@@ -99,6 +114,11 @@ export function Dashboard() {
     null
   );
   const [isFlagReasonLoading, setIsFlagReasonLoading] = useState(false);
+
+  // --- Reupload (from the flag dialog) ---
+  const reuploadInputRef = useRef<HTMLInputElement>(null);
+  const [isReuploading, setIsReuploading] = useState(false);
+  const [reuploadError, setReuploadError] = useState<string | null>(null);
 
   // --- Flag reason translation ---
   const [translateLanguages, setTranslateLanguages] = useState<SupportedLanguage[]>([]);
@@ -137,6 +157,7 @@ export function Dashboard() {
   function openFlagReason(doc: WaqfDocument) {
     setFlagDoc(doc);
     setIsFlagReasonLoading(true);
+    setReuploadError(null);
     // Reset any translation left over from a previously opened flag.
     setSelectedLanguage("");
     setTranslatedReason(null);
@@ -145,6 +166,71 @@ export function Dashboard() {
       setFlagReason(result);
       setIsFlagReasonLoading(false);
     });
+  }
+
+  function handleReuploadInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !flagDoc) return;
+    if (!isReuploadAcceptedFile(file)) {
+      setReuploadError("Unsupported file type. Use JPG, PNG, TIFF, WEBP, or PDF.");
+      return;
+    }
+    if (file.size > REUPLOAD_MAX_SIZE_BYTES) {
+      setReuploadError("File is larger than the 25 MB limit.");
+      return;
+    }
+
+    const documentId = flagDoc.id;
+    setReuploadError(null);
+    setIsReuploading(true);
+    reuploadDocument(documentId, file)
+      .then(async ({ document: processingDoc }) => {
+        // The file is saved and OCR is queued (status="processing") the
+        // moment this resolves — reflect that right away, then poll by id
+        // until the background OCR pass actually finishes. Without this,
+        // the dialog would say "queued for review" and then just sit on
+        // "processing" forever until someone manually refreshes the page.
+        setDocuments((prev) => prev.map((d) => (d.id === documentId ? processingDoc : d)));
+        setFlagDoc(processingDoc);
+
+        const detail = await pollDocumentUntilReady(documentId, {
+          intervalMs: 2500,
+          timeoutMs: 5 * 60 * 1000,
+        });
+
+        if (!detail) {
+          // Not a failure — OCR is just taking longer than usual. The
+          // record is already safely saved; leave it as "processing" and
+          // let the person check back rather than blocking the dialog.
+          toast(`${file.name} is still processing — check back on the Dashboard shortly.`, { icon: "⏳" });
+          return;
+        }
+
+        const finalDoc = detail.document;
+        setDocuments((prev) => prev.map((d) => (d.id === documentId ? finalDoc : d)));
+        setFlagDoc(finalDoc);
+        getDashboardStats().then(setStats);
+
+        if (finalDoc.status === "flagged") {
+          toast(`${file.name} uploaded, but OCR still couldn't process it — flagged again.`, { icon: "⚠️" });
+        } else {
+          toast.success(`${file.name} reuploaded and queued for review.`);
+        }
+      })
+      .catch((err) => {
+        const status = (err as { response?: { status?: number } }).response?.status;
+        const detail = (err as { response?: { data?: { detail?: string } } }).response?.data?.detail;
+        const message =
+          status === 409
+            ? detail ?? `${MAX_REUPLOAD_ATTEMPTS} attempts done. Please visit the office.`
+            : detail ?? "Reupload failed. Try again.";
+        setReuploadError(message);
+        toast.error(message);
+      })
+      .finally(() => {
+        setIsReuploading(false);
+      });
   }
 
   function handleTranslateLanguageChange(languageCode: string) {
@@ -201,6 +287,8 @@ export function Dashboard() {
   const totalPages = Math.max(1, Math.ceil(filteredDocuments.length / PAGE_SIZE));
   const pageSafe = Math.min(currentPage, totalPages);
   const paginatedDocuments = filteredDocuments.slice((pageSafe - 1) * PAGE_SIZE, pageSafe * PAGE_SIZE);
+
+  const reuploadAttemptsLeft = flagDoc ? Math.max(0, MAX_REUPLOAD_ATTEMPTS - flagDoc.reuploadCount) : 0;
 
   return (
     <div className="space-y-6">
@@ -575,6 +663,61 @@ export function Dashboard() {
             <p className="text-sm text-muted-foreground py-2">
               No reason was recorded for this flag.
             </p>
+          )}
+
+          {flagDoc && (
+            <div className="space-y-2 border-t border-border pt-3">
+              <input
+                ref={reuploadInputRef}
+                type="file"
+                accept={REUPLOAD_ACCEPTED_EXT}
+                className="hidden"
+                onChange={handleReuploadInputChange}
+              />
+
+              {isReuploading && flagDoc.status === "processing" ? (
+                <div className="flex items-center gap-2 rounded-md bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                  Uploaded — extracting fields…
+                </div>
+              ) : !isReuploading && flagDoc.status !== "flagged" ? (
+                <div className="flex items-center gap-2 rounded-md bg-registry-green/10 px-3 py-2 text-xs text-registry-green">
+                  <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                  Document reuploaded — queued for review again.
+                </div>
+              ) : reuploadAttemptsLeft <= 0 ? (
+                <div className="flex items-start gap-2 rounded-md bg-rust/10 px-3 py-2">
+                  <Building2 className="h-4 w-4 text-rust shrink-0 mt-0.5" />
+                  <p className="text-xs text-rust leading-snug">
+                    3 attempts done. Please visit the office with the original document for
+                    in-person verification.
+                  </p>
+                </div>
+              ) : (
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">
+                    {reuploadAttemptsLeft} attempt{reuploadAttemptsLeft === 1 ? "" : "s"} remaining
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 gap-1.5 text-xs"
+                    disabled={isReuploading}
+                    onClick={() => reuploadInputRef.current?.click()}
+                  >
+                    {isReuploading ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    )}
+                    {isReuploading ? "Uploading…" : "Reupload document"}
+                  </Button>
+                </div>
+              )}
+
+              {reuploadError && <p className="text-xs text-destructive">{reuploadError}</p>}
+            </div>
           )}
         </DialogContent>
       </Dialog>

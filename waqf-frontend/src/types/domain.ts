@@ -91,6 +91,12 @@ export function confidenceBand(confidence: number): ConfidenceBand {
  */
 export type DpdpStatus = "checking" | "compliant" | "needs_review";
 
+/** A flagged document gets this many reupload attempts (on top of the
+ *  original upload) before a reviewer is told to visit the office in
+ *  person with the original document. Matches the backend's
+ *  MAX_REUPLOAD_ATTEMPTS in app/routers/documents.py. */
+export const MAX_REUPLOAD_ATTEMPTS = 3;
+
 export interface WaqfDocument {
   id: string;
   filename: string;
@@ -122,6 +128,11 @@ export interface WaqfDocument {
    * this was tracked. See Review.tsx's diagnostics panel.
    */
   extractionNotes?: string | null;
+  /** How many times this document has been reuploaded after being flagged
+   *  (see POST /documents/{id}/reupload). Capped at MAX_REUPLOAD_ATTEMPTS —
+   *  the Dashboard's flag dialog uses this to show "N attempts remaining"
+   *  and disable reupload once exhausted. */
+  reuploadCount: number;
 }
 
 export interface ExtractedField {
