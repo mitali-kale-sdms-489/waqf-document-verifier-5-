@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import toast from "react-hot-toast";
 import {
+  AlertTriangle,
+  Building2,
   CheckCircle2,
   FileText,
   Loader2,
@@ -15,16 +17,26 @@ import { pollDocumentUntilReady, uploadDocument } from "@/api/documents";
 import type { WaqfDocument } from "@/types/domain";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { DocumentPreview } from "@/components/documents/DocumentPreview";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 const ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/tiff", "application/pdf"];
 const ACCEPTED_EXT = ".png,.jpg,.jpeg,.webp,.tif,.tiff,.pdf";
 const MAX_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB
 
-// How many reupload attempts to show for a flagged document. This is
-// purely informational — reuploading is never actually blocked, the
-// count just ticks down (floors at 0) so the user has a sense of how
-// many tries are typical before escalating to a supervisor.
+// A flagged document gets 3 total attempts before we send the person to
+// the office: the original upload counts as attempt 1, so once it's
+// flagged there are 2 reupload attempts left. This ticks down (floors at
+// 0) on every reupload, and once it hits 0 the "Reupload" action is
+// disabled — replaced with a message to visit the office in person.
 const STARTING_REUPLOAD_ATTEMPTS = 2;
 
 // How long we're willing to keep polling GET /documents/{id} for OCR to
@@ -46,9 +58,18 @@ interface UploadItem {
   errorMessage?: string;
   document?: WaqfDocument;
   /** Only set once a document comes back flagged; ticks down (floors at 0)
-   *  each time the user hits "Reupload" for this item. Informational only —
-   *  reuploading is never blocked. */
+   *  each time the user hits "Reupload" for this item. Once it reaches 0
+   *  the reupload action is disabled and the person is told to visit the
+   *  office with the original document. */
   remainingAttempts?: number;
+}
+
+/** A reupload the user has picked but not yet confirmed. We hold onto the
+ *  file and show the previously uploaded document one more time so the
+ *  person can verify they're replacing the right one before it's gone. */
+interface PendingReupload {
+  key: string;
+  file: File;
 }
 
 function isAcceptedFile(file: File): boolean {
@@ -67,6 +88,7 @@ export function Upload() {
   const { isElevated } = useAuth();
   const [items, setItems] = useState<UploadItem[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [pendingReupload, setPendingReupload] = useState<PendingReupload | null>(null);
   const dragCounter = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   // Per-item hidden file inputs used to trigger a reupload for one specific
@@ -229,9 +251,13 @@ export function Upload() {
   );
 
   /** Reuploads a fresh file into an existing (flagged) item's slot,
-   *  ticking its remaining-attempts counter down — never blocking, just
-   *  informational. */
+   *  ticking its remaining-attempts counter down. Once the counter is
+   *  already at 0 this is a no-op — the UI hides the "Reupload" action at
+   *  that point, but we guard here too in case of a stale click. */
   function reuploadItem(key: string, file: File) {
+    const target = itemsRef.current.find((it) => it.key === key);
+    if (target && (target.remainingAttempts ?? STARTING_REUPLOAD_ATTEMPTS) <= 0) return;
+
     setItems((prev) =>
       prev.map((it) => {
         if (it.key !== key) return it;
@@ -264,7 +290,20 @@ export function Upload() {
       toast.error(`${file.name}: exceeds 25 MB limit`);
       return;
     }
-    reuploadItem(key, file);
+    // Don't replace the document yet — show the currently uploaded scan
+    // one more time so the person can verify they're removing the right
+    // one before it's gone for good.
+    setPendingReupload({ key, file });
+  }
+
+  function confirmPendingReupload() {
+    if (!pendingReupload) return;
+    reuploadItem(pendingReupload.key, pendingReupload.file);
+    setPendingReupload(null);
+  }
+
+  function cancelPendingReupload() {
+    setPendingReupload(null);
   }
 
   function handleBrowseChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -469,33 +508,47 @@ export function Upload() {
                         )}
                       </div>
 
-                      {item.document.status === "flagged" && (
-                        <div className="flex items-center justify-between gap-2 rounded-md bg-muted/60 px-2 py-1.5">
-                          <p className="text-[11px] text-muted-foreground">
-                            {item.remainingAttempts ?? STARTING_REUPLOAD_ATTEMPTS} upload
-                            {(item.remainingAttempts ?? STARTING_REUPLOAD_ATTEMPTS) === 1 ? "" : "s"} left
-                          </p>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            className="h-7 gap-1 px-2 text-xs"
-                            onClick={() => reuploadInputRefs.current.get(item.key)?.click()}
-                          >
-                            <RotateCcw className="h-3 w-3" /> Reupload
-                          </Button>
-                          <input
-                            ref={(el) => {
-                              if (el) reuploadInputRefs.current.set(item.key, el);
-                              else reuploadInputRefs.current.delete(item.key);
-                            }}
-                            type="file"
-                            accept={ACCEPTED_EXT}
-                            className="hidden"
-                            onChange={(e) => handleReuploadInputChange(item.key, e)}
-                          />
-                        </div>
-                      )}
+                      {item.document.status === "flagged" &&
+                        (() => {
+                          const attemptsLeft = item.remainingAttempts ?? STARTING_REUPLOAD_ATTEMPTS;
+                          if (attemptsLeft <= 0) {
+                            return (
+                              <div className="flex items-start gap-2 rounded-md bg-rust/10 px-2 py-1.5">
+                                <Building2 className="h-3.5 w-3.5 text-rust shrink-0 mt-0.5" />
+                                <p className="text-[11px] text-rust leading-snug">
+                                  No reupload attempts left. Please visit your nearest Waqf office with the
+                                  original document for in-person verification.
+                                </p>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="flex items-center justify-between gap-2 rounded-md bg-muted/60 px-2 py-1.5">
+                              <p className="text-[11px] text-muted-foreground">
+                                {attemptsLeft} upload{attemptsLeft === 1 ? "" : "s"} left
+                              </p>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-7 gap-1 px-2 text-xs"
+                                onClick={() => reuploadInputRefs.current.get(item.key)?.click()}
+                              >
+                                <RotateCcw className="h-3 w-3" /> Reupload
+                              </Button>
+                              <input
+                                ref={(el) => {
+                                  if (el) reuploadInputRefs.current.set(item.key, el);
+                                  else reuploadInputRefs.current.delete(item.key);
+                                }}
+                                type="file"
+                                accept={ACCEPTED_EXT}
+                                className="hidden"
+                                onChange={(e) => handleReuploadInputChange(item.key, e)}
+                              />
+                            </div>
+                          );
+                        })()}
                     </div>
                   )}
                 </div>
@@ -504,6 +557,44 @@ export function Upload() {
           </div>
         </div>
       )}
+
+      <Dialog open={pendingReupload !== null} onOpenChange={(open) => !open && cancelPendingReupload()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Replace this document?</DialogTitle>
+            <DialogDescription>
+              This is the document currently on file. Confirm you want to remove it and upload{" "}
+              <span className="font-medium">{pendingReupload?.file.name}</span> instead — this can't be
+              undone.
+            </DialogDescription>
+          </DialogHeader>
+
+          {pendingReupload &&
+            (() => {
+              const target = items.find((it) => it.key === pendingReupload.key);
+              return target?.document ? (
+                <div className="h-64">
+                  <DocumentPreview doc={target.document} minHeightClassName="h-full" className="h-full" />
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-md bg-muted/60 px-3 py-2 text-sm text-muted-foreground">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  Original scan preview isn't available, but you can still proceed.
+                </div>
+              );
+            })()}
+
+          <DialogFooter>
+            <Button variant="outline" onClick={cancelPendingReupload}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmPendingReupload} className="gap-2">
+              <RotateCcw className="h-4 w-4" />
+              Remove & upload new
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

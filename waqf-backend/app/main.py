@@ -56,6 +56,19 @@ def _migrate_extracted_fields_columns() -> None:
             conn.execute(text("ALTER TABLE extracted_fields ADD COLUMN field_value_en TEXT"))
 
 
+def _migrate_waqf_documents_columns() -> None:
+    """Same rationale as _migrate_ocr_settings_columns above — adds
+    reupload_count to any waqf_documents table that pre-dates the
+    flagged-document reupload-attempts feature."""
+    inspector = inspect(engine)
+    if "waqf_documents" not in inspector.get_table_names():
+        return
+    existing_columns = {col["name"] for col in inspector.get_columns("waqf_documents")}
+    if "reupload_count" not in existing_columns:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE waqf_documents ADD COLUMN reupload_count INTEGER DEFAULT 0"))
+
+
 def _migrate_enum_values(table: str, column: str, required_values: set[str]) -> None:
     """Postgres backs `Enum(...)` columns with a real native ENUM type when
     the table is freshly created via `Base.metadata.create_all`, and that
@@ -144,6 +157,7 @@ def on_startup() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate_ocr_settings_columns()
     _migrate_extracted_fields_columns()
+    _migrate_waqf_documents_columns()
     _migrate_enum_values("extracted_fields", "source", {"gemini_vision"})
     _migrate_enum_values("ocr_settings", "primary_engine", {"gemini_vision"})
     _migrate_enum_values("waqf_documents", "script_type", {"hindi_devanagari", "sanskrit_devanagari"})

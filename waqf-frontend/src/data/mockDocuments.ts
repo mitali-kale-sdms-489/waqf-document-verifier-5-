@@ -230,6 +230,7 @@ function seed() {
       uploadedAt,
       uploadedBy: "user@waqf.gov.in",
       overallConfidence: def.overallConfidence,
+      reuploadCount: 0,
     };
     const fields = def.fields.map(([name, value, conf]) =>
       makeField(documentId, name, value, conf, def.scriptType === "urdu_nastaliq" ? "sarvam_vision" : "tesseract")
@@ -504,6 +505,7 @@ export async function addUploadedDocument({ file, uploadedBy }: UploadedDocument
     previewUrl,
     mimeType: file.type || null,
     fileSizeBytes: file.size,
+    reuploadCount: 0,
   };
 
   store.set(documentId, { document, fields, validations, scriptSample: scriptType });

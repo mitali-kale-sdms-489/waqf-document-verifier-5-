@@ -175,6 +175,14 @@ class WaqfDocument(Base):
         nullable=True,
     )
 
+    # Counts reupload attempts against a flagged document (the original
+    # upload does NOT count against this — it only increments on POST
+    # /documents/{id}/reupload). Capped client- and server-side at
+    # MAX_REUPLOAD_ATTEMPTS (see app/routers/documents.py); once reached,
+    # the document can no longer be reuploaded and the reviewer is told to
+    # visit the office in person with the original document.
+    reupload_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
     fields: Mapped[list["ExtractedField"]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",

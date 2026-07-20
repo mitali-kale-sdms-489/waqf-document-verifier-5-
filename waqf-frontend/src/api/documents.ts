@@ -93,6 +93,23 @@ export async function uploadDocument(file: File): Promise<UploadResult> {
   return data;
 }
 
+/** POST /documents/{id}/reupload — multipart file upload that replaces the
+ *  file behind a flagged document and re-runs OCR against it, reusing the
+ *  same document id (unlike uploadDocument, which always creates a new
+ *  document). The backend caps this at MAX_REUPLOAD_ATTEMPTS and returns a
+ *  409 once exhausted; the updated document's reuploadCount tells the
+ *  Dashboard's flag dialog how many attempts remain. Same "processing"/poll
+ *  shape as uploadDocument — the OCR pipeline runs as a background task. */
+export async function reuploadDocument(documentId: string, file: File): Promise<UploadResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const { data } = await apiClient.post<UploadResult>(`/documents/${documentId}/reupload`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+    timeout: 20_000,
+  });
+  return data;
+}
+
 export interface PollOptions {
   intervalMs?: number;
   /** Give up after this long and resolve with whatever state we last saw

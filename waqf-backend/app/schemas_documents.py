@@ -68,6 +68,11 @@ class WaqfDocumentOut(CamelModel):
     # app/models.py. Optional/None for pre-existing records saved before
     # this was tracked.
     extraction_notes: str | None = None
+    # How many times this document has been reuploaded after being flagged
+    # (see POST /documents/{id}/reupload). Capped at MAX_REUPLOAD_ATTEMPTS
+    # in app/routers/documents.py — the frontend uses this to show
+    # "N attempts remaining" and disable reupload once exhausted.
+    reupload_count: int = 0
 
 
 class DocumentDetailOut(CamelModel):
